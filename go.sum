@@ -444,8 +444,6 @@ github.com/hyperledger/firefly-common v1.1.4 h1:7Oqe7FFOSjt8Uo3/i/ujD4wke2kD2Xr2
 github.com/hyperledger/firefly-common v1.1.4/go.mod h1:taWRM7vsramcM7iWjeOmIgm3yd+RoWvaXSWxZKpSXM8=
 github.com/hyperledger/firefly-signer v1.1.4 h1:Qpu1GLRWfsU3srtodGYqJ2LmZErYYJPstRLUlyh+zCg=
 github.com/hyperledger/firefly-signer v1.1.4/go.mod h1:4h2MN910A2knrWGYCT+aWjBDlhptgQn/9WcT1N/Ct8s=
-github.com/hyperledger/firefly-transaction-manager v1.1.5 h1:EK/TgixsyaN0V6MkgZSAOmPqJIMic+jb3Hivki1IskI=
-github.com/hyperledger/firefly-transaction-manager v1.1.5/go.mod h1:jr9d7t1fEE45SuWs6+0GonZI/E0O69cGFecX2fmsGKU=
 github.com/ianlancetaylor/demangle v0.0.0-20181102032728-5e5cf60278f6/go.mod h1:aSSvb/t6k1mPoxDqO4vJh6VOCGPwU4O0C2/Eqndh1Sc=
 github.com/ianlancetaylor/demangle v0.0.0-20200824232613-28f6c0f3b639/go.mod h1:aSSvb/t6k1mPoxDqO4vJh6VOCGPwU4O0C2/Eqndh1Sc=
 github.com/imdario/mergo v0.3.11 h1:3tnifQM4i+fbajXKBHXWEH+KvNHqojZ778UH75j3bGA=
@@ -470,6 +468,8 @@ github.com/jstemmer/go-junit-report v0.0.0-20190106144839-af01ea7f8024/go.mod h1
 github.com/jstemmer/go-junit-report v0.9.1/go.mod h1:Brl9GWCQeLvo8nXZwPNNblvFj/XSXhF0NWZEnDohbsk=
 github.com/julienschmidt/httprouter v1.2.0/go.mod h1:SYymIcj16QtmaHHD7aYtjjsJG7VTCxuUUipMqKk8s4w=
 github.com/julienschmidt/httprouter v1.3.0/go.mod h1:JR6WtHb+2LUe8TCKY3cZOxFyyO8IZAc4RVcycCCAKdM=
+github.com/kaleido-io/firefly-transaction-manager v1.1.6 h1:JnOXMqgSEKES5YDrGvwnUaovZuwDEYcsCKfHKXBjs5E=
+github.com/kaleido-io/firefly-transaction-manager v1.1.6/go.mod h1:jr9d7t1fEE45SuWs6+0GonZI/E0O69cGFecX2fmsGKU=
 github.com/karlseguin/ccache v2.0.3+incompatible h1:j68C9tWOROiOLWTS/kCGg9IcJG+ACqn5+0+t8Oh83UU=
 github.com/karlseguin/ccache v2.0.3+incompatible/go.mod h1:CM9tNPzT6EdRh14+jiW8mEF9mkNZuuE51qmgGYUB93w=
 github.com/karlseguin/expect v1.0.8/go.mod h1:lXdI8iGiQhmzpnnmU/EGA60vqKs8NbRNFnhhrJGoD5g=
