@@ -75,4 +75,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/hyperledger/firefly-transaction-manager => github.com/kaleido-io/firefly-transaction-manager v1.1.7
+replace github.com/hyperledger/firefly-transaction-manager => github.com/kaleido-io/firefly-transaction-manager v1.1.8
