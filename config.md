@@ -97,6 +97,7 @@
 |---|-----------|----|-------------|
 |dispatchConcurrency|The maximum number of concurrent batch dispatching process|`int`|`50`
 |enabled|Whether to enable batching JSON-RPC requests|`boolean`|`false`
+|excludeMethodsRegex|A Regex string to disable batch for the matching JSON-RPC methods in the requests|`string`|`<nil>`
 |size|When the amount of queued requests reaches this number, they will be batched and dispatched|`int`|`500`
 |timeout|When the time since the first request was queued reaches this timeout, all requests in the queue will be batched and dispatched|[`time.Duration`](https://pkg.go.dev/time#Duration)|`50ms`
 

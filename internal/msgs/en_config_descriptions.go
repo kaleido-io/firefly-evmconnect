@@ -45,6 +45,7 @@ var (
 	ConfigRPCBatchSize                  = ffc("config.connector.batch.size", "When the amount of queued requests reaches this number, they will be batched and dispatched", i18n.IntType)
 	ConfigRPCBatchTimeout               = ffc("config.connector.batch.timeout", "When the time since the first request was queued reaches this timeout, all requests in the queue will be batched and dispatched", i18n.TimeDurationType)
 	ConfigRPCBatchDispatchConcurrency   = ffc("config.connector.batch.dispatchConcurrency", "The maximum number of concurrent batch dispatching process", i18n.IntType)
+	ConfigRPCBatchExcludeMethodsRegex   = ffc("config.connector.batch.excludeMethodsRegex", "A Regex string to disable batch for the matching JSON-RPC methods in the requests", i18n.StringType)
 	ConfigHederaCompatibilityMode       = ffc("config.connector.hederaCompatibilityMode", "Compatibility mode for Hedera, allowing non-standard block header hashes to be processed", i18n.BooleanType)
 	ConfigTraceTXForRevertReason        = ffc("config.connector.traceTXForRevertReason", "Enable the use of transaction trace functions (e.g. debug_traceTransaction) to obtain transaction revert reasons. This can place a high load on the EVM client.", i18n.BooleanType)
 )
