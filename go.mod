@@ -101,4 +101,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/hyperledger/firefly-signer => github.com/kaleido-io/firefly-signer v0.0.0-20240813155806-da6709406ef3
+replace github.com/hyperledger/firefly-signer => github.com/kaleido-io/firefly-signer v0.0.0-20240813161555-448f74980271
