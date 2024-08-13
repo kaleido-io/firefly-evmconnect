@@ -19,6 +19,7 @@ package ethereum
 import (
 	"github.com/hyperledger/firefly-common/pkg/config"
 	"github.com/hyperledger/firefly-common/pkg/wsclient"
+	"github.com/hyperledger/firefly-signer/pkg/rpcbackend"
 )
 
 const (
@@ -35,7 +36,6 @@ const (
 	RetryInitDelay              = "retry.initialDelay"
 	RetryMaxDelay               = "retry.maxDelay"
 	RetryFactor                 = "retry.factor"
-	MaxConcurrentRequests       = "maxConcurrentRequests"
 	TxCacheSize                 = "txCacheSize"
 	HederaCompatibilityMode     = "hederaCompatibilityMode"
 	TraceTXForRevertReason      = "traceTXForRevertReason"
@@ -72,7 +72,7 @@ func InitConfig(conf config.Section) {
 	conf.AddKnownKey(RetryFactor, DefaultRetryDelayFactor)
 	conf.AddKnownKey(RetryInitDelay, DefaultRetryInitDelay)
 	conf.AddKnownKey(RetryMaxDelay, DefaultRetryMaxDelay)
-	conf.AddKnownKey(MaxConcurrentRequests, 50)
+	rpcbackend.InitConfig(conf)
 	conf.AddKnownKey(TxCacheSize, 250)
 	conf.AddKnownKey(HederaCompatibilityMode, false)
 	conf.AddKnownKey(TraceTXForRevertReason, false)

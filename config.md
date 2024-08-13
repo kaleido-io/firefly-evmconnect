@@ -74,7 +74,7 @@
 |headers|Adds custom headers to HTTP requests|`map[string]string`|`<nil>`
 |hederaCompatibilityMode|Compatibility mode for Hedera, allowing non-standard block header hashes to be processed|`boolean`|`false`
 |idleTimeout|The max duration to hold a HTTP keepalive connection between calls|[`time.Duration`](https://pkg.go.dev/time#Duration)|`475ms`
-|maxConcurrentRequests|Maximum of concurrent requests to be submitted to the blockchain|`int`|`50`
+|maxConcurrentRequests|The maximum number of concurrent JSON-RPC requests get processed at a time|`int`|`50`
 |maxConnsPerHost|The max number of connections, per unique hostname. Zero means no limit|`int`|`0`
 |maxIdleConns|The max number of idle connections to hold pooled|`int`|`100`
 |passthroughHeadersEnabled|Enable passing through the set of allowed HTTP request headers|`boolean`|`false`
@@ -90,6 +90,15 @@
 |---|-----------|----|-------------|
 |password|Password|`string`|`<nil>`
 |username|Username|`string`|`<nil>`
+
+## connector.batch
+
+|Key|Description|Type|Default Value|
+|---|-----------|----|-------------|
+|dispatchConcurrency|The maximum number of concurrent batch dispatching process|`int`|`50`
+|enabled|Whether to enable batching JSON-RPC requests|`boolean`|`false`
+|size|When the amount of queued requests reaches this number, they will be batched and dispatched|`int`|`500`
+|timeout|When the time since the first request was queued reaches this timeout, all requests in the queue will be batched and dispatched|[`time.Duration`](https://pkg.go.dev/time#Duration)|`50ms`
 
 ## connector.events
 
