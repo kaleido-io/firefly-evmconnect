@@ -102,3 +102,5 @@ require (
 )
 
 replace github.com/hyperledger/firefly-signer => github.com/kaleido-io/firefly-signer v0.0.0-20240813161555-448f74980271
+
+replace github.com/hyperledger/firefly-transaction-manager => github.com/kaleido-io/firefly-transaction-manager v0.0.0-20240618093530-d29b1618a4e7
