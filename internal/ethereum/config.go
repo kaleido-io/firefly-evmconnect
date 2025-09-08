@@ -36,6 +36,10 @@ const (
 	RetryMaxDelay               = "queryLoopRetry.maxDelay"
 	RetryFactor                 = "queryLoopRetry.factor"
 
+	CanonicalChainMode                = "canonicalChain.mode"
+	CanonicalChainSectionSize         = "canonicalChain.sectionSize"
+	CanonicalChainMaxNumberOfSections = "canonicalChain.maxNumberOfSections"
+
 	DeprecatedRetryInitDelay = "retry.initialDelay"
 	DeprecatedRetryMaxDelay  = "retry.maxDelay"
 	DeprecatedRetryFactor    = "retry.factor"

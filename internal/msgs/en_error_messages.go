@@ -71,4 +71,6 @@ var (
 	MsgReturnValueNotDecoded     = ffe("FF23053", "Error return value for custom error: %s")
 	MsgReturnValueNotAvailable   = ffe("FF23054", "Error return value unavailable")
 	MsgInvalidProtocolID         = ffe("FF23055", "Invalid protocol ID in event log: %s")
+	MsgFailedToQueryBlockInfo    = ffe("FF23056", "Failed to query block info using hash %s")
+	MsgFailedToQueryReceipt      = ffe("FF23057", "Failed to query receipt for transaction %s")
 )

@@ -31,6 +31,7 @@ import (
 	"github.com/hyperledger/firefly-evmconnect/internal/msgs"
 	"github.com/hyperledger/firefly-signer/pkg/ethtypes"
 	"github.com/hyperledger/firefly-signer/pkg/rpcbackend"
+	"github.com/hyperledger/firefly-transaction-manager/pkg/apitypes"
 	"github.com/hyperledger/firefly-transaction-manager/pkg/ffcapi"
 )
 
@@ -60,10 +61,252 @@ type blockListener struct {
 	mux                        sync.Mutex
 	consumers                  map[fftypes.UUID]*blockUpdateConsumer
 	blockPollingInterval       time.Duration
-	unstableHeadLength         int
-	canonicalChain             *list.List
 	hederaCompatibilityMode    bool
 	blockCache                 *lru.Cache
+
+	// use chain sections to keep track of the canonical chain
+	// sectionedCanonicalChain canonicalChain // canonical chain organized by sections
+	// chainSectionSize        uint
+	// maxNumberOfSections     uint
+
+	//  canonical chain
+	unstableHeadLength int
+	canonicalChain     *list.List
+}
+
+// type chainSection struct {
+// 	blocksByNumber map[uint64]*list.Element
+// 	blocksByHash   map[string]*list.Element
+// 	blocksByTxHash map[string]*list.Element
+// 	blocks         *list.List
+// }
+
+// type canonicalChain struct {
+// 	sections            map[uint64]*chainSection
+// 	sectionSize         int64
+// 	maxNumberOfSections int64
+// 	bl                  *blockListener
+// 	rwMutex             sync.RWMutex
+// }
+
+// func newCanonicalChain(bl *blockListener, sectionSize int64, maxNumberOfSections int64) canonicalChain {
+// 	return canonicalChain{
+// 		sections:            make(map[uint64]*chainSection),
+// 		sectionSize:         sectionSize,
+// 		maxNumberOfSections: maxNumberOfSections,
+// 		bl:                  bl,
+// 		rwMutex:             sync.RWMutex{},
+// 	}
+// }
+
+// func (cc *canonicalChain) addNewBlock(txBlock *blockInfoJSONRPC) { // create a new section if it doesn't exist and update the existing section if it does
+// 	cc.rwMutex.Lock()
+// 	defer cc.rwMutex.Unlock()
+
+// 	// calculate the starting session number
+// 	startingSectionNumber := uint64((txBlock.Number.BigInt().Int64() / cc.sectionSize) * cc.sectionSize)
+// 	existingSection, hasExistingSection := cc.sections[startingSectionNumber]
+
+// 	// txBlockElement := &list.Element{}
+
+// 	if !hasExistingSection {
+// 		// build a new section starting from the current transaction block, we don't need to look backwards
+// 		cc.sections[startingSectionNumber] = &chainSection{
+// 			blocksByNumber: make(map[uint64]*list.Element),
+// 			blocksByHash:   make(map[string]*list.Element),
+// 			blocksByTxHash: make(map[string]*list.Element),
+// 			blocks:         list.New(),
+// 		}
+// 	} else {
+// 		// check why the existing section doesn't have the block number yet
+// 		_, hasBlockNumber := existingSection.blocksByNumber[txBlock.Number.BigInt().Uint64()]
+// 		if !hasBlockNumber {
+// 			// // the block number is not in the existing section, so we need to add it
+// 			existingSection.blocksByNumber[txBlock.Number.BigInt().Uint64()] = &list.Element{
+// 				Value: txBlock,
+// 			}
+// 			existingSection.blocksByHash[txBlock.Hash.String()] = &list.Element{
+// 				Value: txBlock,
+// 			}
+
+// 		}
+// 	}
+
+// }
+
+func (cc *canonicalChain) BuildConfirmationsForTransaction(ctx context.Context, txHash string, confirmMap *ConfirmationMap, targetConfirmationCount int) (*ConfirmationMapUpdateResult, error) {
+	cc.rwMutex.RLock()
+	defer cc.rwMutex.RUnlock()
+
+	// Initialize the output context
+	occ := ConfirmationMapUpdateResult{
+		ConfirmationMap:         confirmMap,
+		HasNewFork:              false,
+		HasNewConfirmation:      false,
+		Confirmed:               false,
+		TargetConfirmationCount: targetConfirmationCount,
+	}
+
+	// Search for the transaction in memory first
+	var txBlock *list.Element
+	var txBlockHash string
+
+	for _, section := range cc.sections {
+		if blockElement, ok := section.blocksByTxHash[txHash]; ok {
+			txBlock = blockElement
+			blockInfo := blockElement.Value.(*minimalBlockInfo)
+			txBlockHash = blockInfo.hash
+			break
+		}
+	}
+
+	// If transaction not found in memory, return empty context
+	if txBlock == nil {
+		res, reason, receiptErr := cc.bl.c.TransactionReceipt(ctx, &ffcapi.TransactionReceiptRequest{
+			TransactionHash: txHash,
+		})
+		if receiptErr != nil || res == nil {
+			if receiptErr != nil && reason != ffcapi.ErrorReasonNotFound {
+				log.L(ctx).Debugf("Failed to query receipt for transaction %s: %s", txHash, receiptErr)
+				return nil, i18n.WrapError(ctx, receiptErr, msgs.MsgFailedToQueryReceipt, txHash)
+			}
+			log.L(ctx).Debugf("Receipt for transaction %s not yet available: %v", txHash, receiptErr)
+			return nil, i18n.WrapError(ctx, receiptErr, msgs.MsgFailedToQueryReceipt, txHash)
+		}
+
+		// we found the transaction block but we didn't find it in any of the existing chain sections
+		// figure out which section it belongs to and add it to the section
+		txBlockNumber := res.BlockNumber.Int64()
+		txBlockHash := res.BlockHash
+		txBlockInfo, reason, err := cc.bl.getBlockInfoByNumber(ctx, txBlockNumber, false, txBlockHash)
+		if err != nil {
+			log.L(ctx).Debugf("Failed to query block info for transaction %s: %s (reason: %s)", txHash, err, reason)
+			return nil, i18n.WrapError(ctx, err, msgs.MsgFailedToQueryBlockInfo, txBlockHash)
+		}
+		cc.addNewBlock(txBlockInfo)
+		// attempt to start a new canonical chain from the transaction block
+	}
+
+	// Check if we have an existing confirmation queue for this leading block hash
+	existingQueue, hasExistingQueue := occ.ConfirmationQueueMap[txBlockHash]
+
+	if hasExistingQueue {
+		// Compare the existing confirmation queue with the in-memory linked list
+		occ.HasNewFork, occ.HasNewConfirmation = cc.compareAndUpdateConfirmationQueue(txBlock, existingQueue, occ.ConfirmationMap, txBlockHash, targetConfirmationCount, false, false)
+	} else {
+		// Create a new confirmation queue starting from the transaction block
+		occ.HasNewFork = true
+		occ.HasNewConfirmation = true
+		occ.ConfirmationQueueMap[txBlockHash] = cc.buildNewConfirmationQueue(txBlock, targetConfirmationCount)
+	}
+
+	// Set the canonical block hash
+	if occ.CanonicalBlockHash != txBlockHash {
+		occ.HasNewFork = true
+		occ.CanonicalBlockHash = txBlockHash
+	}
+
+	if len(occ.ConfirmationQueueMap[txBlockHash]) >= targetConfirmationCount+1 {
+		occ.Confirmed = true
+	}
+
+	return &occ, nil
+}
+
+// NOTE: this function only build up the confirmation queue uses the in-memory canonical chain
+// it does not build up the canonical chain
+// compareAndUpdateConfirmationQueue compares the existing confirmation queue with the in-memory linked list
+// and updates the confirmation queue accordingly. Returns true if there's a new fork.
+func (cc *canonicalChain) compareAndUpdateConfirmationQueue(txBlock *list.Element, existingQueue []*apitypes.Confirmation, confirmMap *ConfirmationMap, txBlockHash string, targetConfirmationCount int, hasNewFork bool, hasNewConfirmation bool) (bool, bool) {
+	newQueue := make([]*apitypes.Confirmation, 0)
+
+	// Start from the transaction block and traverse forward
+	currentBlock := txBlock
+	queueIndex := 0
+
+	for currentBlock != nil && queueIndex < len(existingQueue) {
+		blockInfo := currentBlock.Value.(*minimalBlockInfo)
+		existingConfirmation := existingQueue[queueIndex]
+
+		// Check if the block hash matches
+		if existingConfirmation.BlockHash != blockInfo.hash {
+			// Hash mismatch - this indicates a fork
+			hasNewFork = true
+			break
+		}
+
+		// Hash matches, add to new queue
+		newQueue = append(newQueue, existingConfirmation)
+
+		// Move to next block and next confirmation
+		currentBlock = currentBlock.Next()
+		queueIndex++
+	}
+
+	// If we have more blocks in the linked list than in the existing queue, add new confirmations
+	if currentBlock != nil {
+		hasNewConfirmation = true
+		for currentBlock != nil && len(newQueue) < targetConfirmationCount+1 {
+			blockInfo := currentBlock.Value.(*minimalBlockInfo)
+			newConfirmation := &apitypes.Confirmation{
+				BlockHash:   blockInfo.hash,
+				BlockNumber: fftypes.FFuint64(blockInfo.number), //nolint:gosec // block numbers are always positive
+				ParentHash:  blockInfo.parentHash,
+			}
+			newQueue = append(newQueue, newConfirmation)
+			currentBlock = currentBlock.Next()
+		}
+	}
+
+	if len(newQueue) < targetConfirmationCount+1 {
+		// check whether there is a new section we can use to build up the confirmation queue
+		highestBlockNumber := newQueue[len(newQueue)-1].BlockNumber.Uint64()
+		if highestBlockNumber+1%uint64(cc.sectionSize) == 0 { //nolint:gosec // block numbers are always positive
+			startingSectionNumber := highestBlockNumber + 1
+			existingSection, hasExistingSection := cc.sections[startingSectionNumber]
+			if hasExistingSection {
+				// check whether the section has the block number
+				startingBlock, hasBlockNumber := existingSection.blocksByNumber[startingSectionNumber]
+				if hasBlockNumber {
+					// the section has the block number, so we can use it to build up the confirmation queue
+					return cc.compareAndUpdateConfirmationQueue(startingBlock, newQueue, confirmMap, txBlockHash, targetConfirmationCount, hasNewFork, hasNewConfirmation)
+				}
+			}
+		}
+	}
+
+	// If we have fewer blocks in the linked list than in the existing queue, we have a fork
+	if queueIndex < len(existingQueue) {
+		hasNewFork = true
+	}
+
+	// Update the confirmation queue map
+	confirmMap.ConfirmationQueueMap[txBlockHash] = newQueue
+
+	return hasNewFork, hasNewConfirmation
+}
+
+// buildNewConfirmationQueue creates a new confirmation queue starting from the transaction block
+func (cc *canonicalChain) buildNewConfirmationQueue(txBlock *list.Element, targetConfirmationCount int) []*apitypes.Confirmation {
+	newQueue := make([]*apitypes.Confirmation, 0)
+
+	// Start from the transaction block and traverse forward
+	currentBlock := txBlock
+	confirmationCount := 0
+
+	for currentBlock != nil && confirmationCount <= targetConfirmationCount+1 {
+		blockInfo := currentBlock.Value.(*minimalBlockInfo)
+		newConfirmation := &apitypes.Confirmation{
+			BlockHash:   blockInfo.hash,
+			BlockNumber: fftypes.FFuint64(blockInfo.number), //nolint:gosec // block numbers are always positive
+			ParentHash:  blockInfo.parentHash,
+		}
+		newQueue = append(newQueue, newConfirmation)
+
+		currentBlock = currentBlock.Next()
+		confirmationCount++
+	}
+	return newQueue
 }
 
 type minimalBlockInfo struct {
@@ -84,10 +327,19 @@ func newBlockListener(ctx context.Context, c *ethConnector, conf config.Section,
 		highestBlock:               -1,
 		consumers:                  make(map[fftypes.UUID]*blockUpdateConsumer),
 		blockPollingInterval:       conf.GetDuration(BlockPollingInterval),
-		canonicalChain:             list.New(),
-		unstableHeadLength:         int(c.checkpointBlockGap),
 		hederaCompatibilityMode:    conf.GetBool(HederaCompatibilityMode),
 	}
+
+	ccMode := conf.GetString(CanonicalChainMode)
+	if ccMode == "sectioned" {
+		bl.sectionedCanonicalChain = newCanonicalChain(c, conf.GetInt64(CanonicalChainSectionSize), conf.GetInt64(CanonicalChainMaxNumberOfSections))
+		bl.chainSectionSize = conf.GetUint(CanonicalChainSectionSize)
+		bl.maxNumberOfSections = conf.GetUint(CanonicalChainMaxNumberOfSections)
+	} else {
+		bl.canonicalChain = list.New()
+		bl.unstableHeadLength = int(c.checkpointBlockGap)
+	}
+
 	if wsConf != nil {
 		bl.wsBackend = rpcbackend.NewWSRPCClient(wsConf)
 	}
@@ -96,6 +348,27 @@ func newBlockListener(ctx context.Context, c *ethConnector, conf config.Section,
 		return nil, i18n.WrapError(ctx, err, msgs.MsgCacheInitFail, "block")
 	}
 	return bl, nil
+}
+
+// confirmationsMap is a map of confirmation contexts by transaction hash
+func (bl *blockListener) reconcileConfirmationsMap(ctx context.Context, confirmationsMap map[string]*ConfirmationMap) (map[string]*ConfirmationMap, error) {
+	// iterate through the confirmationsMap and check if the transaction hash is in the canonical chain
+	for _, confirmationContext := range confirmationsMap {
+		// Check if transaction exists in the canonical chain
+		found := false
+		for elem := bl.canonicalChain.Front(); elem != nil; elem = elem.Next() {
+			if blockInfo, ok := elem.Value.(*minimalBlockInfo); ok {
+				// This is a simplified check - in a real implementation, you'd need to check
+				// if the transaction hash exists in the block's transaction list
+				_ = blockInfo // placeholder for actual transaction checking logic
+			}
+		}
+		if found {
+			// Update confirmation count logic would go here
+			_ = confirmationContext // placeholder for actual confirmation count update
+		}
+	}
+	return nil, nil
 }
 
 // setting block filter status updates that new block filter has been created
