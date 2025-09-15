@@ -104,7 +104,6 @@ func (bl *blockListener) initializeConfirmationMap(occ *ffcapi.ConfirmationMapUp
 			},
 			CanonicalBlockHash: txBlockHash,
 		}
-		occ.HasNewFork = true
 		return nil
 	}
 
@@ -145,16 +144,14 @@ func (bl *blockListener) processExistingConfirmations(ctx context.Context, occ *
 		currentBlock = currentBlock.Next()
 	}
 
-	if len(existingQueue) == 0 {
+	if len(existingQueue) <= 1 {
 		return newQueue, currentBlock
 	}
 
 	existingConfirmations := existingQueue[1:]
-	if len(existingConfirmations) == 0 {
-		return newQueue, currentBlock
-	}
-
-	return bl.validateExistingConfirmations(ctx, occ, newQueue, existingConfirmations, currentBlock, chainHead, txBlockInfo, targetConfirmationCount)
+	return bl.validateExistingConfirmations(
+		ctx, occ, newQueue, existingConfirmations, currentBlock, chainHead, txBlockInfo, targetConfirmationCount,
+	)
 }
 
 func (bl *blockListener) validateExistingConfirmations(ctx context.Context, occ *ffcapi.ConfirmationMapUpdateResult, newQueue []*ffcapi.MinimalBlockInfo, existingConfirmations []*ffcapi.MinimalBlockInfo, currentBlock *list.Element, chainHead *ffcapi.MinimalBlockInfo, txBlockInfo *ffcapi.MinimalBlockInfo, targetConfirmationCount uint64) ([]*ffcapi.MinimalBlockInfo, *list.Element) {
