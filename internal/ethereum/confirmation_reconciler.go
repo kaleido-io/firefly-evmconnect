@@ -14,8 +14,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package ethereum implements confirmation reconciliation for Ethereum transactions.
-//
 // The confirmation reconciler manages transaction confirmation queues by:
 // - Copying blocks from the canonical chain and the existing confirmation queue
 // - Detecting blockchain forks and rebuilding confirmation queues when necessary
