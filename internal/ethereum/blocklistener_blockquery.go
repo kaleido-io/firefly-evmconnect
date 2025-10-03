@@ -56,12 +56,6 @@ func (bl *blockListener) addToBlockCache(blockInfo *blockInfoJSONRPC) {
 func (bl *blockListener) getBlockInfoContainsTxHash(ctx context.Context, txHash string) (*ffcapi.MinimalBlockInfo, error) {
 
 	// Query the chain to find the transaction block
-	// Note: should consider have an in-memory map of transaction hash to block for faster lookup
-	// The extra memory usage of the map should be outweighed by the speed improvement of lookup
-	// But I saw we have a ffcapi.MinimalBlockInfo struct that intentionally removes the tx hashes
-	// so need to figure out the reason first
-
-	// TODO: add a cache if map cannot be used
 	res, reason, receiptErr := bl.c.TransactionReceipt(ctx, &ffcapi.TransactionReceiptRequest{
 		TransactionHash: txHash,
 	})
@@ -74,7 +68,7 @@ func (bl *blockListener) getBlockInfoContainsTxHash(ctx context.Context, txHash 
 	txBlockHash := res.BlockHash
 	txBlockNumber := res.BlockNumber.Uint64()
 	// get the parent hash of the transaction block
-	bi, reason, err := bl.getBlockInfoByNumber(ctx, txBlockNumber, true, txBlockHash)
+	bi, reason, err := bl.getBlockInfoByNumber(ctx, txBlockNumber, true, "", txBlockHash)
 	if err != nil && reason != ffcapi.ErrorReasonNotFound { // if the block info is not found, then there could be a fork, twe don't throw error in this case and treating it as block not found
 		return nil, i18n.WrapError(ctx, err, msgs.MsgFailedToQueryBlockInfo, txHash)
 	}
@@ -89,14 +83,14 @@ func (bl *blockListener) getBlockInfoContainsTxHash(ctx context.Context, txHash 
 	}, nil
 }
 
-func (bl *blockListener) getBlockInfoByNumber(ctx context.Context, blockNumber uint64, allowCache bool, expectedHashStr string) (*blockInfoJSONRPC, ffcapi.ErrorReason, error) {
+func (bl *blockListener) getBlockInfoByNumber(ctx context.Context, blockNumber uint64, allowCache bool, expectedParentHashStr string, expectedBlockHashStr string) (*blockInfoJSONRPC, ffcapi.ErrorReason, error) {
 	var blockInfo *blockInfoJSONRPC
 	if allowCache {
 		cached, ok := bl.blockCache.Get(strconv.FormatUint(blockNumber, 10))
 		if ok {
 			blockInfo = cached.(*blockInfoJSONRPC)
-			if expectedHashStr != "" && blockInfo.ParentHash.String() != expectedHashStr {
-				log.L(ctx).Debugf("Block cache miss for block %d due to mismatched parent hash expected=%s found=%s", blockNumber, expectedHashStr, blockInfo.ParentHash)
+			if (expectedParentHashStr != "" && blockInfo.ParentHash.String() != expectedParentHashStr) || (expectedBlockHashStr != "" && blockInfo.Hash.String() != expectedBlockHashStr) {
+				log.L(ctx).Debugf("Block cache miss for block %d due to mismatched parent hash expected=%s found=%s", blockNumber, expectedParentHashStr, blockInfo.ParentHash)
 				blockInfo = nil
 			}
 		}
