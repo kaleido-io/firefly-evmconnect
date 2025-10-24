@@ -54,7 +54,7 @@ func (bl *blockListener) buildConfirmationList(ctx context.Context, existingConf
 	// Primary objective of this algorithm is to build a contiguous, linked list of `MinimalBlockInfo` structs, starting from the transaction block and ending as far as our current knowledge of the in-memory partial canonical chain allows.
 	// Secondary objective is to report whether any fork was detected (and corrected) during this analysis
 
-	// before we get into the main algorithm, handle a couple of special cases to reduce complexity of the main algorithm
+	// handle confirmation count of 0 as a special case to reduce complexity of the main algorithm
 	if targetConfirmationCount == 0 {
 		reconcileResult, err := bl.handleZeroTargetConfirmationCount(ctx, txBlockInfo)
 		if reconcileResult != nil || err != nil {
@@ -76,7 +76,7 @@ func (bl *blockListener) buildConfirmationList(ctx context.Context, existingConf
 
 	earlyList := createEarlyList(existingConfirmations, txBlockInfo, reconcileResult)
 
-	// if early list is sufficient to meet the target confirmation count, we handle this as a special case
+	// if early list is sufficient to meet the target confirmation count, we handle this as a special case as well
 	if len(earlyList) > 0 && earlyList[len(earlyList)-1].BlockNumber.Uint64()+1 >= txBlockInfo.BlockNumber.Uint64()+targetConfirmationCount {
 		reconcileResult := bl.handleTargetCountMetWithEarlyList(earlyList, txBlockInfo, targetConfirmationCount)
 		if reconcileResult != nil {
