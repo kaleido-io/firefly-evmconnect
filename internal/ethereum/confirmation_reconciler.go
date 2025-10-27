@@ -14,11 +14,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The confirmation reconciler manages transaction confirmation queues by:
-// - Copying blocks from the in-memory partial chain and the existing confirmation queue
-// - Detecting blockchain forks and rebuilding confirmation queues when necessary
-// - Filling gaps in confirmation queues by fetching missing blocks
-// - Determining when transactions have reached the target confirmation count
 package ethereum
 
 import (
@@ -34,13 +29,6 @@ import (
 // ReconcileConfirmationsForTransaction is the public API for reconciling transaction confirmations.
 // It delegates to the blockListener's internal reconciliation logic.
 func (c *ethConnector) ReconcileConfirmationsForTransaction(ctx context.Context, txHash string, existingConfirmations []*ffcapi.MinimalBlockInfo, targetConfirmationCount uint64) (*ffcapi.ConfirmationUpdateResult, error) {
-
-	// Before we start, make sure that the existing confirmations queue is valid and consistent with itself
-	err := validateExistingConfirmations(ctx, existingConfirmations)
-	if err != nil {
-		return nil, err
-	}
-
 	// Now we can start the reconciliation process
 	return c.blockListener.reconcileConfirmationsForTransaction(ctx, txHash, existingConfirmations, targetConfirmationCount)
 }
@@ -48,7 +36,7 @@ func (c *ethConnector) ReconcileConfirmationsForTransaction(ctx context.Context,
 // reconcileConfirmationsForTransaction reconciles the confirmation queue for a transaction
 func (bl *blockListener) reconcileConfirmationsForTransaction(ctx context.Context, txHash string, existingConfirmations []*ffcapi.MinimalBlockInfo, targetConfirmationCount uint64) (*ffcapi.ConfirmationUpdateResult, error) {
 
-	// Fetch the block containing the transaction then start the algorithm proper
+	// Fetch the block containing the transaction first so that we can use it to build the confirmation list
 	txBlockInfo, err := bl.getBlockInfoContainsTxHash(ctx, txHash)
 	if err != nil {
 		log.L(ctx).Errorf("Failed to fetch block info using tx hash %s: %v", txHash, err)
@@ -63,17 +51,20 @@ func (bl *blockListener) reconcileConfirmationsForTransaction(ctx context.Contex
 }
 
 func (bl *blockListener) buildConfirmationList(ctx context.Context, existingConfirmations []*ffcapi.MinimalBlockInfo, txBlockInfo *ffcapi.MinimalBlockInfo, targetConfirmationCount uint64) (*ffcapi.ConfirmationUpdateResult, error) {
-	// Primary objective of this algorithm is to build a contiguous, linked list of `MinimalBlockInfo` structs, starting from the transaction block and ending as far as our current knowledge of the canonical chain allows.
+	// Primary objective of this algorithm is to build a contiguous, linked list of `MinimalBlockInfo` structs, starting from the transaction block and ending as far as our current knowledge of the in-memory partial canonical chain allows.
 	// Secondary objective is to report whether any fork was detected (and corrected) during this analysis
-	// Initialize the result with existing confirmations
-	reconcileResult := &ffcapi.ConfirmationUpdateResult{
-		TargetConfirmationCount: targetConfirmationCount,
+
+	// handle confirmation count of 0 as a special case to reduce complexity of the main algorithm
+	if targetConfirmationCount == 0 {
+		reconcileResult, err := bl.handleZeroTargetConfirmationCount(ctx, txBlockInfo)
+		if reconcileResult != nil || err != nil {
+			return reconcileResult, err
+		}
 	}
 
-	// before we get into the main algorithm, a couple of special cases to optimize for that can save us some work
-	reconcileResult, err := bl.handleSpecialCases(ctx, existingConfirmations, txBlockInfo, targetConfirmationCount, reconcileResult)
-	if reconcileResult.Confirmed || err != nil {
-		return reconcileResult, err
+	// Initialize the result with the target confirmation count
+	reconcileResult := &ffcapi.ConfirmationUpdateResult{
+		TargetConfirmationCount: targetConfirmationCount,
 	}
 
 	// We start by constructing 2 lists of blocks:
@@ -83,8 +74,17 @@ func (bl *blockListener) buildConfirmationList(ctx context.Context, existingConf
 	//    The chain may have been re-organized since we discovered the blocks in that list.
 	// - The `lateList`. This is the most recent set of blocks that we are interesting in and we believe are accurate for the current state of the chain
 
-	earlyList := createEarlyList(ctx, existingConfirmations, txBlockInfo, reconcileResult)
-	lateList, err := createLateList(ctx, txBlockInfo, targetConfirmationCount, reconcileResult, bl)
+	earlyList := createEarlyList(existingConfirmations, txBlockInfo, reconcileResult)
+
+	// if early list is sufficient to meet the target confirmation count, we handle this as a special case as well
+	if len(earlyList) > 0 && earlyList[len(earlyList)-1].BlockNumber.Uint64()+1 >= txBlockInfo.BlockNumber.Uint64()+targetConfirmationCount {
+		reconcileResult := bl.handleTargetCountMetWithEarlyList(earlyList, txBlockInfo, targetConfirmationCount)
+		if reconcileResult != nil {
+			return reconcileResult, nil
+		}
+	}
+
+	lateList, err := createLateList(ctx, txBlockInfo, targetConfirmationCount, bl)
 	if err != nil {
 		return nil, err
 	}
@@ -95,19 +95,18 @@ func (bl *blockListener) buildConfirmationList(ctx context.Context, existingConf
 		reconcileResult.NewFork = true
 	}
 	for {
-		// now loop until we can form a contiguous linked list from the spliced list
-
-		if !splicedList.containsTransactionBlock() {
-			// It contained the transaction when we first spliced the lists together
-			// so it must have gotten removed because of a broken link
-			// if this happens, it must mean that the chain is currently unstable and we need to start over
-			reconcileResult.NewFork = true
-			break
+		// now loop until we can form a contiguous linked list (by block number) from the spliced list
+		if splicedList.isEarlyListEmpty() {
+			// the first block in the early list is transaction block
+			// if that block is removed, it means the chain is not stable enough for the logic
+			// to generate a valid confirmation list
+			// therefore, we report a fork with no confirmations
+			return nil, i18n.NewError(ctx, msgs.MsgFailedToBuildConfirmationQueue)
 		}
 
-		// inner loop to fill any gaps
+		// inner loop to fill any gaps between the early list and the late list
 		for splicedList.hasGap() {
-			err = splicedList.fillGap(ctx, bl)
+			err = splicedList.fillOneGap(ctx, bl)
 			if err != nil {
 				return nil, err
 			}
@@ -127,7 +126,6 @@ func (bl *blockListener) buildConfirmationList(ctx context.Context, existingConf
 	}
 
 	reconcileResult.Confirmed = uint64(len(reconcileResult.Confirmations)) > targetConfirmationCount // do this maths here as a utility so that the consumer doesn't have to do it
-
 	return reconcileResult, nil
 }
 
@@ -146,19 +144,18 @@ func newSplice(earlyList []*ffcapi.MinimalBlockInfo, lateList []*ffcapi.MinimalB
 		earlyList: earlyList,
 		lateList:  lateList,
 	}
-	if len(s.earlyList) == 0 || len(s.lateList) == 0 {
-		return s, false
-	}
 	detectedFork := false
 	// if the early list is bigger than the gap between the transaction block number and the first block in the late list, then we have an overlap
 	txBlockNumber := s.earlyList[0].BlockNumber.Uint64()
 	firstLateBlockNumber := s.lateList[0].BlockNumber.Uint64()
 	if uint64(len(s.earlyList))+txBlockNumber > firstLateBlockNumber {
-
 		// there is an overlap so we need to discard the end of the early list but before we do, lets check whether it is equivalent to the equivalent blocks from the late
 		// list so that we can report whether or not a fork was detected
 		discardedEarlyListBlocks := s.earlyList[firstLateBlockNumber-txBlockNumber:]
 		for i := range discardedEarlyListBlocks {
+			if i >= len(s.lateList) {
+				break
+			}
 			if !discardedEarlyListBlocks[i].Equal(s.lateList[i]) {
 				detectedFork = true
 				break
@@ -176,17 +173,12 @@ func (s *splice) hasGap() bool {
 		s.earlyList[len(s.earlyList)-1].BlockNumber.Uint64()+1 < s.lateList[0].BlockNumber.Uint64()
 }
 
-func (s *splice) containsTransactionBlock() bool {
+func (s *splice) isEarlyListEmpty() bool {
 	// we haven't removed the first block from the early list
-	return len(s.earlyList) > 0
+	return len(s.earlyList) == 0
 }
 
-func (s *splice) fillGap(ctx context.Context, blockListener *blockListener) error {
-	if !s.hasGap() {
-		// no gap to fill
-		return nil
-	}
-
+func (s *splice) fillOneGap(ctx context.Context, blockListener *blockListener) error {
 	// fill one slot in the gap between the late list and the early list
 	// always fill from the end of the gap ( i.e. the block before the start of the late list) because
 	// the late list is our best view of the current canonical chain so working backwards from there will increase the number of blocks that we have a high confidence in
@@ -194,9 +186,6 @@ func (s *splice) fillGap(ctx context.Context, blockListener *blockListener) erro
 	freshBlockInfo, _, err := blockListener.getBlockInfoByNumber(ctx, s.lateList[0].BlockNumber.Uint64()-1, false, "", "")
 	if err != nil {
 		return err
-	}
-	if freshBlockInfo == nil {
-		return i18n.NewError(ctx, msgs.MsgBlockNotAvailable)
 	}
 
 	fetchedBlock := &ffcapi.MinimalBlockInfo{
@@ -211,31 +200,18 @@ func (s *splice) fillGap(ctx context.Context, blockListener *blockListener) erro
 		return i18n.NewError(ctx, msgs.MsgFailedToBuildConfirmationQueue)
 	}
 
-	// Prepend fetched block to confirmation queue
+	// Prepend fetched block to the late list
 	s.lateList = append([]*ffcapi.MinimalBlockInfo{fetchedBlock}, s.lateList...)
 	return nil
 }
 
 func (s *splice) removeBrokenLink() {
-	if s.hasGap() {
-		// nothing to remove if there is a gap
-		return
-	}
 	// remove the last block from the early list because it is not the parent of the first block in the late list and we have higher confidence in the late list
 	s.earlyList = s.earlyList[:len(s.earlyList)-1]
 
 }
 
 func (s *splice) toSingleLinkedList() []*ffcapi.MinimalBlockInfo {
-	if s.hasGap() {
-		return nil
-	}
-	if len(s.earlyList) == 0 {
-		return s.lateList
-	}
-	if len(s.lateList) == 0 {
-		return s.earlyList
-	}
 	if s.earlyList[len(s.earlyList)-1].IsParentOf(s.lateList[0]) {
 		return append(s.earlyList, s.lateList...)
 	}
@@ -244,22 +220,37 @@ func (s *splice) toSingleLinkedList() []*ffcapi.MinimalBlockInfo {
 
 }
 
-func createEarlyList(ctx context.Context, existingConfirmations []*ffcapi.MinimalBlockInfo, txBlockInfo *ffcapi.MinimalBlockInfo, reconcileResult *ffcapi.ConfirmationUpdateResult) (earlyList []*ffcapi.MinimalBlockInfo) {
-	if len(existingConfirmations) > 0 && !existingConfirmations[0].Equal(txBlockInfo) {
-		// otherwise we discard the existing confirmations queue
-		reconcileResult.NewFork = true
-	} else {
-		earlyList = existingConfirmations
+// createEarlyList will return a list of blocks that starts with the latest transaction block and followed by any blocks in the existing confirmations list that are still valid
+// any blocks that are not contiguous will be discarded
+func createEarlyList(existingConfirmations []*ffcapi.MinimalBlockInfo, txBlockInfo *ffcapi.MinimalBlockInfo, reconcileResult *ffcapi.ConfirmationUpdateResult) (earlyList []*ffcapi.MinimalBlockInfo) {
+	if len(existingConfirmations) > 0 {
+		if !existingConfirmations[0].Equal(txBlockInfo) {
+			// we discard the existing confirmations list if the transaction block doesn't match
+			reconcileResult.NewFork = true
+		} else {
+			// validate and trim the confirmations list to only include linked blocks
+
+			earlyList = []*ffcapi.MinimalBlockInfo{txBlockInfo}
+			for i := 1; i < len(existingConfirmations); i++ {
+				if !earlyList[i-1].IsParentOf(existingConfirmations[i]) {
+					// set rebuilt flag to true to indicate the existing confirmations list is not contiguous
+					reconcileResult.Rebuilt = true
+					break
+				}
+				earlyList = append(earlyList, existingConfirmations[i])
+			}
+		}
+
 	}
 
-	if len(existingConfirmations) == 0 {
+	if len(earlyList) == 0 {
 		// either because this is the first time we are reconciling this transaction or because we just discarded the existing confirmations queue
 		earlyList = []*ffcapi.MinimalBlockInfo{txBlockInfo}
 	}
 	return earlyList
 }
 
-func createLateList(ctx context.Context, txBlockInfo *ffcapi.MinimalBlockInfo, targetConfirmationCount uint64, reconcileResult *ffcapi.ConfirmationUpdateResult, blockListener *blockListener) (lateList []*ffcapi.MinimalBlockInfo, err error) {
+func createLateList(ctx context.Context, txBlockInfo *ffcapi.MinimalBlockInfo, targetConfirmationCount uint64, blockListener *blockListener) (lateList []*ffcapi.MinimalBlockInfo, err error) {
 	lateList, err = blockListener.buildConfirmationQueueUsingInMemoryPartialChain(ctx, txBlockInfo, targetConfirmationCount)
 	if err != nil {
 		return nil, err
@@ -272,10 +263,6 @@ func createLateList(ctx context.Context, txBlockInfo *ffcapi.MinimalBlockInfo, t
 		if err != nil {
 			return nil, err
 		}
-		if targetBlockInfo == nil {
-			return nil, i18n.NewError(ctx, msgs.MsgBlockNotAvailable)
-		}
-
 		lateList = []*ffcapi.MinimalBlockInfo{
 			{
 				BlockNumber: fftypes.FFuint64(targetBlockInfo.Number.BigInt().Uint64()),
@@ -287,7 +274,7 @@ func createLateList(ctx context.Context, txBlockInfo *ffcapi.MinimalBlockInfo, t
 	return lateList, nil
 }
 
-// buildConfirmationQueueUsingInMemoryPartialChain builds the confirmation queue using the in-memory partial chain.
+// buildConfirmationQueueUsingInMemoryPartialChain builds the late list using the in-memory partial chain.
 // It does not modify the in-memory partial chain itself, only reads from it.
 // This function holds a read lock on the in-memory partial chain, so it should not make long-running queries.
 func (bl *blockListener) buildConfirmationQueueUsingInMemoryPartialChain(ctx context.Context, txBlockInfo *ffcapi.MinimalBlockInfo, targetConfirmationCount uint64) (newConfirmationsWithoutTxBlock []*ffcapi.MinimalBlockInfo, err error) {
@@ -332,87 +319,60 @@ func (bl *blockListener) buildConfirmationQueueUsingInMemoryPartialChain(ctx con
 	return newConfirmationsWithoutTxBlock, nil
 }
 
-func (bl *blockListener) getBlockByNumberFromInMemoryPartialChain(ctx context.Context, blockNumber uint64) *ffcapi.MinimalBlockInfo {
+func (bl *blockListener) handleZeroTargetConfirmationCount(ctx context.Context, txBlockInfo *ffcapi.MinimalBlockInfo) (*ffcapi.ConfirmationUpdateResult, error) {
 	bl.mux.RLock()
 	defer bl.mux.RUnlock()
-	if blockNumber < bl.canonicalChain.Front().Value.(*ffcapi.MinimalBlockInfo).BlockNumber.Uint64() {
-		return nil
+	// if the target confirmation count is 0, and the transaction blocks is before the last block in the in-memory partial chain,
+	// we can immediately return a confirmed result
+	chainTail := bl.canonicalChain.Back().Value.(*ffcapi.MinimalBlockInfo)
+	if chainTail.BlockNumber.Uint64() >= txBlockInfo.BlockNumber.Uint64() {
+		return &ffcapi.ConfirmationUpdateResult{
+			Confirmed:     true,
+			Confirmations: []*ffcapi.MinimalBlockInfo{txBlockInfo},
+		}, nil
 	}
-	if blockNumber > bl.canonicalChain.Back().Value.(*ffcapi.MinimalBlockInfo).BlockNumber.Uint64() {
-		return nil
+	log.L(ctx).Debugf("in-memory partial chain is waiting for the transaction block %d (%s) to be indexed", txBlockInfo.BlockNumber.Uint64(), txBlockInfo.BlockHash)
+	return nil, i18n.NewError(ctx, msgs.MsgInMemoryPartialChainNotCaughtUp, txBlockInfo.BlockNumber.Uint64(), txBlockInfo.BlockHash)
+}
+
+func (bl *blockListener) handleTargetCountMetWithEarlyList(existingConfirmations []*ffcapi.MinimalBlockInfo, txBlockInfo *ffcapi.MinimalBlockInfo, targetConfirmationCount uint64) *ffcapi.ConfirmationUpdateResult {
+	bl.mux.RLock()
+	defer bl.mux.RUnlock()
+	nextInMemoryBlock := bl.canonicalChain.Front()
+	var nextInMemoryBlockInfo *ffcapi.MinimalBlockInfo
+	lastExistingConfirmation := existingConfirmations[len(existingConfirmations)-1]
+	// iterates to the block that immediately after the last existing confirmation
+	for nextInMemoryBlock != nil {
+		nextInMemoryBlockInfo = nextInMemoryBlock.Value.(*ffcapi.MinimalBlockInfo)
+		if nextInMemoryBlockInfo.BlockNumber.Uint64() >= lastExistingConfirmation.BlockNumber.Uint64()+1 {
+			break
+		}
+		nextInMemoryBlock = nextInMemoryBlock.Next()
 	}
-	for nextInMemoryBlock := bl.canonicalChain.Front(); nextInMemoryBlock != nil; nextInMemoryBlock = nextInMemoryBlock.Next() {
-		nextInMemoryBlockInfo := nextInMemoryBlock.Value.(*ffcapi.MinimalBlockInfo)
-		if nextInMemoryBlockInfo.BlockNumber.Uint64() == blockNumber {
-			return nextInMemoryBlockInfo
+
+	if nextInMemoryBlockInfo != nil && lastExistingConfirmation.IsParentOf(nextInMemoryBlockInfo) {
+		// the existing confirmation are connected to the in memory partial chain so we can return them without fetching any more blocks
+		if targetConfirmationCount < uint64(len(existingConfirmations)) {
+			return &ffcapi.ConfirmationUpdateResult{
+				Confirmed:     true,
+				Confirmations: existingConfirmations[:targetConfirmationCount+1],
+			}
+		}
+		// only the existing confirmations are not enough, need to fetch more blocks from the in memory partial chain
+		newList := existingConfirmations
+		targetBlockNumber := txBlockInfo.BlockNumber.Uint64() + targetConfirmationCount
+
+		for nextInMemoryBlock := bl.canonicalChain.Front(); nextInMemoryBlock != nil; nextInMemoryBlock = nextInMemoryBlock.Next() {
+			nextInMemoryBlockInfo := nextInMemoryBlock.Value.(*ffcapi.MinimalBlockInfo)
+			if nextInMemoryBlockInfo.BlockNumber.Uint64() > targetBlockNumber {
+				break
+			}
+			newList = append(newList, nextInMemoryBlockInfo)
+		}
+		return &ffcapi.ConfirmationUpdateResult{
+			Confirmed:     uint64(len(newList)) > targetConfirmationCount,
+			Confirmations: newList,
 		}
 	}
 	return nil
-}
-
-func validateExistingConfirmations(ctx context.Context, existingConfirmations []*ffcapi.MinimalBlockInfo) error {
-	var previousBlock *ffcapi.MinimalBlockInfo
-	var previousBlockNumber uint64
-	for _, existingConfirmation := range existingConfirmations {
-		if previousBlock != nil {
-			if existingConfirmation.BlockNumber.Uint64() != previousBlockNumber+1 {
-				return i18n.NewError(ctx, msgs.MsgFailedToBuildConfirmationQueue)
-			}
-			if !previousBlock.IsParentOf(existingConfirmation) {
-				return i18n.NewError(ctx, msgs.MsgFailedToBuildConfirmationQueue)
-			}
-		}
-		previousBlock = existingConfirmation
-		previousBlockNumber = existingConfirmation.BlockNumber.Uint64()
-
-	}
-	return nil
-}
-
-func (bl *blockListener) handleSpecialCases(ctx context.Context, existingConfirmations []*ffcapi.MinimalBlockInfo, txBlockInfo *ffcapi.MinimalBlockInfo, targetConfirmationCount uint64, reconcileResult *ffcapi.ConfirmationUpdateResult) (*ffcapi.ConfirmationUpdateResult, error) {
-	if targetConfirmationCount == 0 {
-		// if the target confirmation count is 0, we can immediately return a confirmed result
-		reconcileResult.Confirmed = true
-		reconcileResult.Confirmations = []*ffcapi.MinimalBlockInfo{txBlockInfo}
-		return reconcileResult, nil
-	}
-
-	if uint64(len(existingConfirmations)) > targetConfirmationCount {
-		if existingConfirmations[0].Equal(txBlockInfo) {
-			// start of the existing confirmations  aligns with our latest view of the chain
-
-			// attempt to validate the rest of the existing confirmations.  Starting with the target confirmation block and working forwards
-
-			attemptIndex := targetConfirmationCount
-
-			for attemptIndex < uint64(len(existingConfirmations))-1 {
-				existingConfirmationToValidate := existingConfirmations[attemptIndex]
-				blockInfo := bl.getBlockByNumberFromInMemoryPartialChain(ctx, existingConfirmationToValidate.BlockNumber.Uint64())
-				if blockInfo == nil {
-					attemptIndex++
-					continue
-				}
-				if blockInfo.BlockHash == existingConfirmationToValidate.BlockHash {
-					// the last block in the existing confirmations queue is still valid
-					reconcileResult.Confirmed = true
-					reconcileResult.Confirmations = existingConfirmations[:targetConfirmationCount+1]
-					return reconcileResult, nil
-				}
-			}
-
-			// if we didn't get a conclusive answer from the in memory cache of the chain, we need to fetch the block from the blockchain
-			targetBlock := existingConfirmations[targetConfirmationCount]
-			blockInfo, _, err := bl.getBlockInfoByNumber(ctx, targetBlock.BlockNumber.Uint64(), false, "", "")
-			if err != nil {
-				return nil, err
-			}
-
-			if blockInfo.Hash.String() == targetBlock.BlockHash {
-				reconcileResult.Confirmed = true
-				reconcileResult.Confirmations = existingConfirmations[:targetConfirmationCount+1]
-				return reconcileResult, nil
-			}
-		}
-	}
-	return reconcileResult, nil
 }
