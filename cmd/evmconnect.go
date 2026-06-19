@@ -27,6 +27,7 @@ import (
 	"github.com/hyperledger/firefly-common/pkg/i18n"
 	"github.com/hyperledger/firefly-common/pkg/log"
 	"github.com/hyperledger/firefly-evmconnect/internal/ethereum"
+	"github.com/hyperledger/firefly-signer/pkg/rpcbackend"
 	fftmcmd "github.com/hyperledger/firefly-transaction-manager/cmd"
 	"github.com/hyperledger/firefly-transaction-manager/pkg/fftm"
 	txhandlerfactory "github.com/hyperledger/firefly-transaction-manager/pkg/txhandler/registry"
@@ -109,6 +110,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	rpcbackend.EnableMetrics(ctx, m.MetricsRegistry())
 
 	// Setup signal handling to cancel the context, which shuts down the API Server
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
