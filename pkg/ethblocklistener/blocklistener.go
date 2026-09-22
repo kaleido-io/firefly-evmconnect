@@ -429,7 +429,7 @@ func (bl *blockListener) listenLoop() {
 				continue
 			}
 			bl.currentChainHead = head
-			bl.setBlockHeightMetric(metricCanonicalBlockHeight, bl.currentChainHead)
+			bl.setHighestBlock(head)
 			update := &ffcapi.BlockHashEvent{GapPotential: false, Created: fftypes.Now(), HeadBlockNumber: bl.currentChainHead}
 			bl.consumerMux.Lock()
 			consumers := make([]*BlockUpdateConsumer, 0, len(bl.consumers))
